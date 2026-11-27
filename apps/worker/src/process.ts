@@ -9,18 +9,22 @@ import {
   type Db,
 } from "@lomi/db";
 import { LlmError, PdfParseError, parsePdf, type Extractor } from "@lomi/extraction";
+import { hostname } from "node:os";
 import type { Logger } from "pino";
 
 export interface WorkerConfig {
   leaseMs: number;
   heartbeatMs: number;
   maxAttempts: number;
+  /** Stable identity of this worker (container hostname by default). */
+  workerId?: string;
 }
 
 export const defaultConfig: WorkerConfig = {
   leaseMs: Number(process.env.LEASE_MS ?? 30_000),
   heartbeatMs: Number(process.env.HEARTBEAT_MS ?? 10_000),
   maxAttempts: Number(process.env.MAX_ATTEMPTS ?? 3),
+  workerId: process.env.WORKER_ID ?? hostname(),
 };
 
 export interface Deps {
@@ -52,6 +56,7 @@ export async function processVersion(deps: Deps, versionId: string): Promise<Pro
     leaseMs: config.leaseMs,
     maxAttempts: config.maxAttempts,
     model: extractor.model,
+    workerId: config.workerId,
   });
   if (!claim) {
     log.debug({ versionId }, "not claimable (already taken, done, or superseded)");

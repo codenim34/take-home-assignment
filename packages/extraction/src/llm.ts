@@ -73,19 +73,25 @@ export function buildSchema(fields: readonly FieldDef[]) {
 }
 
 export class AnthropicExtractor implements Extractor {
-  private client: Anthropic;
+  private client: Anthropic | null;
 
   constructor(
     public readonly model: string,
-    opts: { apiKey?: string; timeoutMs?: number } = {},
+    opts: { apiKey?: string; timeoutMs?: number; baseURL?: string } = {},
   ) {
-    // Hard per-request timeout, kept well below the worker lease.
-    this.client = new Anthropic({ apiKey: opts.apiKey, timeout: opts.timeoutMs ?? 60_000, maxRetries: 1 });
+    // Without a key the worker still starts; each extraction fails visibly instead.
+    // Hard per-request timeout; the worker's lease is kept alive by heartbeats meanwhile.
+    this.client = opts.apiKey
+      ? new Anthropic({ apiKey: opts.apiKey, baseURL: opts.baseURL, timeout: opts.timeoutMs ?? 60_000, maxRetries: 1 })
+      : null;
   }
 
   async extract(req: ExtractRequest): Promise<ExtractResult> {
     const { system, user } = buildPrompt(req);
     const prompt = { model: this.model, system, messages: [{ role: "user", content: user }] };
+    if (!this.client) {
+      throw new LlmError("ANTHROPIC_API_KEY is not set. Add it to .env (or set LLM_PROVIDER=fake) and retry.", prompt);
+    }
     let response;
     try {
       response = await this.client.beta.messages.parse(

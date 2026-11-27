@@ -163,7 +163,7 @@ export async function retryCurrentVersion(db: Db, documentId: string): Promise<V
 export async function claimVersion(
   db: Db,
   versionId: string,
-  opts: { leaseMs: number; maxAttempts: number; model: string },
+  opts: { leaseMs: number; maxAttempts: number; model: string; workerId?: string },
 ): Promise<{ version: VersionRow; runId: string } | null> {
   return db.transaction(async (tx) => {
     const runId = randomUUID();
@@ -185,7 +185,9 @@ export async function claimVersion(
       )
       .returning();
     if (!version) return null;
-    await tx.insert(extractionRuns).values({ id: runId, versionId, attempt: version.attempts, model: opts.model });
+    await tx
+      .insert(extractionRuns)
+      .values({ id: runId, versionId, attempt: version.attempts, model: opts.model, workerId: opts.workerId ?? null });
     return { version, runId };
   });
 }
@@ -360,6 +362,32 @@ export async function failRun(
       .where(and(eq(extractionRuns.id, input.runId), eq(extractionRuns.status, "running")));
     return rows.length > 0;
   });
+}
+
+/**
+ * Called once when a worker starts. Any run still `running` under this
+ * worker's id belongs to its previous incarnation (killed or restarted), so it
+ * is certainly dead: expire its lease now instead of waiting for it to time
+ * out. The next reconcile() then re-queues it like any other expired lease.
+ */
+export async function expireOrphanedLeases(db: Db, workerId: string): Promise<string[]> {
+  const rows = await db
+    .update(documentVersions)
+    .set({ leaseExpiresAt: sql`now() - interval '1 second'` })
+    .where(
+      and(
+        eq(documentVersions.status, "extracting"),
+        inArray(
+          documentVersions.currentRunId,
+          db
+            .select({ id: extractionRuns.id })
+            .from(extractionRuns)
+            .where(and(eq(extractionRuns.workerId, workerId), eq(extractionRuns.status, "running"))),
+        ),
+      ),
+    )
+    .returning({ id: documentVersions.id });
+  return rows.map((r) => r.id);
 }
 
 /**

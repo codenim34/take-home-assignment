@@ -1,0 +1,70 @@
+# docker compose up  ->  UI on http://localhost:8080, API on http://localhost:3000
+x-app: &app
+  build: { context: ., target: app }
+  image: lomi-review-app
+  environment: &env
+    DATABASE_URL: postgres://lomi:lomi@postgres:5432/lomi
+    REDIS_URL: redis://redis:6379
+    LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+    LLM_MODEL: ${LLM_MODEL:-claude-sonnet-5-5}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    FAKE_LLM_DELAY_MS: ${FAKE_LLM_DELAY_MS:-1500}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: lomi, POSTGRES_PASSWORD: lomi, POSTGRES_DB: lomi }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lomi"]
+      interval: 2s
+      retries: 30
+
+  # Deliberately no volume / persistence: Redis only coordinates work and can be
+  # wiped at any time. The worker's reconciler rebuilds the queue from Postgres.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+
+  # One-shot: migrations, then seed version 1 of the fixtures (idempotent).
+  migrate:
+    <<: *app
+    command: ["sh", "-c", "node packages/db/dist/migrate.js && node apps/api/dist/seed.js"]
+    environment:
+      <<: *env
+      FIXTURES_DIR: /repo/fixtures
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  api:
+    <<: *app
+    command: ["node", "apps/api/dist/main.js"]
+    ports: ["3000:3000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  worker:
+    <<: *app
+    command: ["node", "apps/worker/dist/main.js"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  web:
+    build: { context: ., target: web }
+    image: lomi-review-web
+    ports: ["8080:80"]
+    depends_on: [api]
+    restart: unless-stopped
+
+volumes:
+  pgdata:

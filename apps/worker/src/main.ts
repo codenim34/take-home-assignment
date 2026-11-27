@@ -1,6 +1,6 @@
 import { Worker } from "bullmq";
 import pino from "pino";
-import { createDb } from "@lomi/db";
+import { createDb, expireOrphanedLeases } from "@lomi/db";
 import { createExtractor } from "@lomi/extraction";
 import { EXTRACTION_QUEUE, ExtractionQueue, redisConnection, type ExtractionJob } from "@lomi/queue";
 import { defaultConfig, processVersion } from "./process.js";
@@ -14,14 +14,17 @@ async function main() {
   const { db, close: closeDb } = createDb();
   const extractor = createExtractor();
   const connection = redisConnection();
+  connection.on("error", (err) => log.warn({ err: err.message }, "redis connection error"));
   const queue = new ExtractionQueue(connection);
   const shutdown = new AbortController();
   const deps = { db, extractor, log, config: defaultConfig, shutdownSignal: shutdown.signal };
 
+  const workerConnection = redisConnection();
+  workerConnection.on("error", (err) => log.warn({ err: err.message }, "redis connection error"));
   const worker = new Worker<ExtractionJob>(
     EXTRACTION_QUEUE,
     async (job) => processVersion(deps, job.data.versionId),
-    { connection: redisConnection(), concurrency: CONCURRENCY, autorun: true },
+    { connection: workerConnection, concurrency: CONCURRENCY, autorun: true },
   );
   worker.on("error", (err) => log.error({ err }, "bullmq worker error"));
 
@@ -33,6 +36,9 @@ async function main() {
       log.error({ err: (err as Error).message }, "reconcile failed");
     }
   };
+  // Runs left "running" by this worker's previous life are dead: recover them now.
+  const orphans = await expireOrphanedLeases(db, defaultConfig.workerId!);
+  if (orphans.length) log.warn({ orphans }, "recovering runs orphaned by this worker's previous process");
   await sweep();
   const timer = setInterval(sweep, RECONCILE_MS);
   log.info({ model: extractor.model, concurrency: CONCURRENCY }, "worker started");
@@ -44,10 +50,14 @@ async function main() {
     log.info({ signal }, "shutting down: handing in-flight work back to the queue");
     clearInterval(timer);
     shutdown.abort();
-    await worker.close();
-    await queue.close();
+    // Bounded: if Redis/Postgres are already gone (whole stack stopping), don't hang.
+    // Anything not handed back is recovered at next startup via expireOrphanedLeases.
+    await Promise.race([
+      Promise.allSettled([worker.close(), queue.close()]),
+      new Promise((r) => setTimeout(r, 8000)),
+    ]);
     connection.disconnect();
-    await closeDb();
+    await Promise.race([closeDb(), new Promise((r) => setTimeout(r, 2000))]);
     process.exit(0);
   };
   process.on("SIGTERM", () => void stop("SIGTERM"));

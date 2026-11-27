@@ -11,8 +11,7 @@
     "start": "node dist/main.js",
     "dev": "tsx watch src/main.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src test",
-    "test:integration": "vitest run"
+    "lint": "eslint src"
   },
   "dependencies": {
     "@lomi/core": "workspace:*",

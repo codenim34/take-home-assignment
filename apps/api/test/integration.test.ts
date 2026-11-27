@@ -7,7 +7,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { Redis } from "ioredis";
-import { claimVersion, documentVersions, extractedValues, extractionRuns, reconcile, type Db } from "@lomi/db";
+import { claimVersion, expireOrphanedLeases, documentVersions, extractedValues, extractionRuns, reconcile, type Db } from "@lomi/db";
 import { ScriptedExtractor } from "@lomi/extraction";
 import { ExtractionQueue } from "@lomi/queue";
 import { processVersion, reconcileOnce } from "@lomi/worker";
@@ -158,6 +158,17 @@ describe("crash and restart recovery", () => {
 
     const runs = await db.select().from(extractionRuns).where(eq(extractionRuns.versionId, versionId));
     expect(runs.map((r) => r.status).sort()).toEqual(["abandoned", "succeeded"]);
+  });
+
+  it("a restarted worker recovers its own orphaned runs immediately, without waiting for the lease", async () => {
+    const { versionId } = await uploadInvoice();
+    await claimVersion(db, versionId, { leaseMs: 30_000, maxAttempts: 3, model: "x", workerId: "worker-a" });
+    // Another worker's identity doesn't touch it...
+    expect(await expireOrphanedLeases(db, "worker-b")).toEqual([]);
+    // ...but worker-a coming back up knows that run is dead.
+    expect(await expireOrphanedLeases(db, "worker-a")).toEqual([versionId]);
+    expect((await reconcile(db, 3)).requeued).toEqual([versionId]);
+    expect(await processVersion(deps(db, goodExtractor()), versionId)).toBe("extracted");
   });
 
   it("the zombie worker that comes back late cannot commit over the new run", async () => {

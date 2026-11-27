@@ -80,6 +80,8 @@ export const extractionRuns = pgTable(
     attempt: integer("attempt").notNull(),
     status: runStatus("status").notNull().default("running"),
     model: text("model"),
+    /** Which worker process held the run (stable per container), for fast orphan recovery on restart. */
+    workerId: text("worker_id"),
     prompt: jsonb("prompt"),
     rawResponse: jsonb("raw_response"),
     error: text("error"),
