@@ -35,18 +35,22 @@ apps/
   worker/     BullMQ consumer + reconciler. The only process that calls the LLM.
   web/        Vite + React + TanStack Query review UI (served by nginx in compose).
 packages/
-  core/       Pure domain logic, no I/O: field defs, normalisation, evidence
-              validation, carry-over rule. Most of the bug-prone code lives here.
-  db/         Drizzle schema, migrations, and every SQL state transition
-              (claim, heartbeat, guarded commit, fail, reconcile, review, reads).
-  extraction/ PDF → text (unpdf), text → candidates (Gemini, Groq or Anthropic, structured output),
-              plus a fake and a scripted extractor for tests.
-  queue/      Queue name, job-id convention, enqueue helper. Small on purpose.
+  core/       Pure domain logic and the ports (interfaces), no I/O: field types,
+              field defs, evidence validation, carry-over rule.
+  db/         Drizzle schema, migrations, repositories. PgExtractionStore holds
+              every worker state transition (claim, lease, commit, fail, reconcile).
+  extraction/ PDF → text (unpdf), text → candidates through a provider registry
+              (Gemini, Groq, Anthropic, fake), plus a scripted extractor for tests.
+  queue/      BullMQ adapter for the JobQueue port. Small on purpose.
 ```
+
+**[ARCHITECTURE.md](ARCHITECTURE.md)** has the component, data-flow, state-machine and ER diagrams, plus the SOLID and design-pattern mapping. **[TESTING.md](TESTING.md)** has the test pyramid, a matrix from each brief requirement to the test that proves it, and the chaos procedures.
 
 Why it's split this way:
 - **Pure logic is separate from I/O.** `core` has no dependencies and is unit-tested against the real fixture text. The hallucination check and the carry-over rule are where a subtle bug costs the most, so they are the easiest code to test.
-- **State transitions live in one place.** Every status change is a single conditional SQL statement in `db/repo.ts`. The API and worker call those functions and never write status themselves, which makes the whole state machine reviewable in one file.
+- **Ports and adapters.** The worker's pipeline is written against four interfaces in `core/ports.ts` (`Extractor`, `JobQueue`, `ExtractionStore`, `RecoveryStore`). Postgres, BullMQ and the LLM SDKs are adapters behind them, and `main.ts` is the only place that wires them.
+- **State transitions live in one place.** Every status change a worker makes is a single conditional, run-id-guarded SQL statement in `db/repositories/extraction-store.ts`. The worker never writes status itself, which makes the whole state machine reviewable in one file.
+- **Open for extension.** A new field type is one entry in `FIELD_TYPES`. A new document type is one entry in `FIELDS`. A new LLM provider is one file under `extraction/src/providers/` plus a registry line. None of them touch the pipeline.
 - **API and worker are separate processes.** A slow or crashing LLM call can't stall uploads, and the worker scales on its own.
 - **The web app imports types only from `db`.** Its response types are `Awaited<ReturnType<typeof getDocument>>` passed through a `Jsonify` helper, so a server change that breaks the UI fails `tsc`, and no server code ends up in the bundle.
 
@@ -54,7 +58,7 @@ Why it's split this way:
 
 ```sh
 pnpm install
-pnpm turbo run lint typecheck build test                   # no services needed
+pnpm knip && pnpm turbo run lint typecheck build test       # no services needed
 DATABASE_URL=postgres://… REDIS_URL=redis://… pnpm turbo run test:integration
 ```
 

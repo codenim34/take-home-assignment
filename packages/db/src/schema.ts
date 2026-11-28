@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { REVIEW_STATES, VERSION_STATUSES } from "@lomi/core";
 import {
   boolean,
   customType,
@@ -17,9 +17,9 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
   dataType: () => "bytea",
 });
 
-export const versionStatus = pgEnum("version_status", ["queued", "extracting", "extracted", "failed", "superseded"]);
+export const versionStatus = pgEnum("version_status", VERSION_STATUSES);
 export const runStatus = pgEnum("run_status", ["running", "succeeded", "failed", "abandoned", "superseded"]);
-export const reviewState = pgEnum("review_state", ["pending", "approved", "corrected", "carried_over"]);
+export const reviewState = pgEnum("review_state", REVIEW_STATES);
 export const changeKind = pgEnum("change_kind", ["new", "unchanged", "changed"]);
 export const reviewAction = pgEnum("review_action", ["approve", "correct"]);
 
@@ -150,5 +150,3 @@ export const reviews = pgTable(
   },
   (t) => [index("reviews_value_idx").on(t.valueId, t.createdAt)],
 );
-
-export const nowSql = sql`now()`;

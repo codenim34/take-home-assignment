@@ -1,8 +1,10 @@
+import type { FieldType } from "./field-types.js";
+
 /**
- * Field definitions per document type. Mirrors fixtures/expected-fields.json
- * (a test asserts they stay in sync) so every package shares one typed source.
+ * Field definitions per document type: pure data, so a new document type is a
+ * new entry here (and its fields' types come from FIELD_TYPES). Mirrors
+ * fixtures/expected-fields.json; a test asserts they stay in sync.
  */
-export type FieldType = "string" | "date" | "money" | "number" | "percent";
 
 export interface FieldDef {
   field: string;

@@ -7,8 +7,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { Redis } from "ioredis";
-import { claimVersion, expireOrphanedLeases, documentVersions, extractedValues, extractionRuns, reconcile, type Db } from "@lomi/db";
-import { LlmError, ScriptedExtractor } from "@lomi/extraction";
+import { documentVersions, extractedValues, extractionRuns, type Db } from "@lomi/db";
+import { LlmError } from "@lomi/extraction";
+import { ScriptedExtractor } from "@lomi/extraction/testing";
 import { ExtractionQueue } from "@lomi/queue";
 import { processVersion, reconcileOnce } from "@lomi/worker";
 import {
@@ -23,6 +24,7 @@ import {
   pdf,
   resetDb,
   setupDb,
+  store,
   upload,
 } from "./helpers.js";
 
@@ -61,7 +63,7 @@ describe("ingest", () => {
     queue.fail = true;
     const { app, id } = await uploadInvoice(queue);
     expect((await getDoc(app, id)).version.status).toBe("queued");
-    const r = await reconcile(db, 3);
+    const r = await store(db).reconcile(3);
     expect(r.queued).toHaveLength(1);
   });
 
@@ -146,11 +148,11 @@ describe("extraction", () => {
     expect(waiting.version.error).toMatch(/Will retry: .*429/);
 
     // Not due yet: the reconciler doesn't enqueue it and a stray job can't claim it.
-    expect((await reconcile(db, 3)).queued).toEqual([]);
+    expect((await store(db).reconcile(3)).queued).toEqual([]);
     expect(await processVersion(deps(db, limited), versionId)).toBe("not_claimed");
 
     await db.update(documentVersions).set({ retryAt: sql`now() - interval '1 second'` }).where(eq(documentVersions.id, versionId));
-    expect((await reconcile(db, 3)).queued).toEqual([{ id: versionId, attempts: 1 }]);
+    expect((await store(db).reconcile(3)).queued).toEqual([{ id: versionId, attempts: 1 }]);
     expect(await processVersion(deps(db, limited), versionId)).toBe("extracted");
     expect((await getDoc(app, id)).version.error).toBeNull();
   });
@@ -183,12 +185,12 @@ describe("crash and restart recovery", () => {
   it("a worker killed mid-extraction: lease expires, reconciler re-queues, next run completes", async () => {
     const { versionId } = await uploadInvoice();
     // Simulate a worker that claimed the job and then died (no heartbeat, no commit).
-    const dead = await claimVersion(db, versionId, { leaseMs: 30_000, maxAttempts: 3, model: "x" });
+    const dead = await store(db).claim(versionId, { leaseMs: 30_000, maxAttempts: 3, model: "x" });
     expect(dead).not.toBeNull();
     expect(await processVersion(deps(db, goodExtractor()), versionId)).toBe("not_claimed");
 
     await db.update(documentVersions).set({ leaseExpiresAt: sql`now() - interval '1 second'` }).where(eq(documentVersions.id, versionId));
-    const r = await reconcile(db, 3);
+    const r = await store(db).reconcile(3);
     expect(r.requeued).toEqual([versionId]);
     expect(await processVersion(deps(db, goodExtractor()), versionId)).toBe("extracted");
 
@@ -198,12 +200,12 @@ describe("crash and restart recovery", () => {
 
   it("a restarted worker recovers its own orphaned runs immediately, without waiting for the lease", async () => {
     const { versionId } = await uploadInvoice();
-    await claimVersion(db, versionId, { leaseMs: 30_000, maxAttempts: 3, model: "x", workerId: "worker-a" });
+    await store(db).claim(versionId, { leaseMs: 30_000, maxAttempts: 3, model: "x", workerId: "worker-a" });
     // Another worker's identity doesn't touch it...
-    expect(await expireOrphanedLeases(db, "worker-b")).toEqual([]);
+    expect(await store(db).expireOrphanedLeases("worker-b")).toEqual([]);
     // ...but worker-a coming back up knows that run is dead.
-    expect(await expireOrphanedLeases(db, "worker-a")).toEqual([versionId]);
-    expect((await reconcile(db, 3)).requeued).toEqual([versionId]);
+    expect(await store(db).expireOrphanedLeases("worker-a")).toEqual([versionId]);
+    expect((await store(db).reconcile(3)).requeued).toEqual([versionId]);
     expect(await processVersion(deps(db, goodExtractor()), versionId)).toBe("extracted");
   });
 
@@ -213,7 +215,7 @@ describe("crash and restart recovery", () => {
     const zombie = processVersion(deps(db, extractor, { config: { leaseMs: 30_000, heartbeatMs: 60_000, maxAttempts: 3, retryBaseMs: 1000 } }), versionId);
     await started;
     await db.update(documentVersions).set({ leaseExpiresAt: sql`now() - interval '1 second'` }).where(eq(documentVersions.id, versionId));
-    await reconcile(db, 3);
+    await store(db).reconcile(3);
     expect(await processVersion(deps(db, goodExtractor()), versionId)).toBe("extracted");
     release();
     expect(await zombie).toBe("lost_ownership");
@@ -224,9 +226,9 @@ describe("crash and restart recovery", () => {
   it("gives up after max attempts so a poison document can't loop forever", async () => {
     const { versionId } = await uploadInvoice();
     for (let i = 0; i < 3; i++) {
-      await claimVersion(db, versionId, { leaseMs: 30_000, maxAttempts: 3, model: "x" });
+      await store(db).claim(versionId, { leaseMs: 30_000, maxAttempts: 3, model: "x" });
       await db.update(documentVersions).set({ leaseExpiresAt: sql`now() - interval '1 second'` }).where(eq(documentVersions.id, versionId));
-      await reconcile(db, 3);
+      await store(db).reconcile(3);
     }
     const [v] = await db.select().from(documentVersions).where(eq(documentVersions.id, versionId));
     expect(v!.status).toBe("failed");
@@ -256,17 +258,17 @@ describe("crash and restart recovery", () => {
       const leaseId = (res.json() as { id: string }).id;
       const [leaseVersion] = await db.select().from(documentVersions).where(eq(documentVersions.documentId, leaseId));
       // The lease version was mid-extraction when Redis was wiped and its worker died.
-      await claimVersion(db, leaseVersion!.id, { leaseMs: 30_000, maxAttempts: 3, model: "x" });
+      await store(db).claim(leaseVersion!.id, { leaseMs: 30_000, maxAttempts: 3, model: "x" });
       await db.update(documentVersions).set({ leaseExpiresAt: sql`now() - interval '1 second'` }).where(eq(documentVersions.id, leaseVersion!.id));
 
       await redis.flushdb();
       expect(await queue.queue.getWaitingCount()).toBe(0);
 
-      await reconcileOnce(db, queue, 3, log);
+      await reconcileOnce(store(db), queue, 3, log);
       const waiting = await queue.queue.getWaiting();
       expect(waiting.map((j) => j.data.versionId).sort()).toEqual([queuedId, leaseVersion!.id].sort());
       // Running it again doesn't duplicate jobs.
-      await reconcileOnce(db, queue, 3, log);
+      await reconcileOnce(store(db), queue, 3, log);
       expect(await queue.queue.getWaitingCount()).toBe(2);
     } finally {
       await redis.flushdb();

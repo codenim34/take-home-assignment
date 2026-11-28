@@ -1,23 +1,27 @@
 import { Worker } from "bullmq";
 import pino from "pino";
-import { createDb, expireOrphanedLeases } from "@lomi/db";
+import { createDb, PgExtractionStore } from "@lomi/db";
 import { createExtractor } from "@lomi/extraction";
 import { EXTRACTION_QUEUE, ExtractionQueue, redisConnection, type ExtractionJob } from "@lomi/queue";
-import { defaultConfig, processVersion } from "./process.js";
+import { configFromEnv } from "./config.js";
+import { processVersion } from "./pipeline.js";
 import { reconcileOnce } from "./reconciler.js";
 
 const log = pino({ name: "worker", level: process.env.LOG_LEVEL ?? "info" });
 const RECONCILE_MS = Number(process.env.RECONCILE_MS ?? 10_000);
 const CONCURRENCY = Number(process.env.WORKER_CONCURRENCY ?? 4);
 
+/** Composition root: the only place that knows which adapters implement the ports. */
 async function main() {
+  const config = configFromEnv();
   const { db, close: closeDb } = createDb();
+  const store = new PgExtractionStore(db);
   const extractor = createExtractor();
   const connection = redisConnection();
   connection.on("error", (err) => log.warn({ err: err.message }, "redis connection error"));
   const queue = new ExtractionQueue(connection);
   const shutdown = new AbortController();
-  const deps = { db, extractor, log, config: defaultConfig, shutdownSignal: shutdown.signal };
+  const deps = { store, extractor, log, config, shutdownSignal: shutdown.signal };
 
   const workerConnection = redisConnection();
   workerConnection.on("error", (err) => log.warn({ err: err.message }, "redis connection error"));
@@ -30,14 +34,14 @@ async function main() {
 
   const sweep = async () => {
     try {
-      await reconcileOnce(db, queue, defaultConfig.maxAttempts, log);
+      await reconcileOnce(store, queue, config.maxAttempts, log);
     } catch (err) {
       // Redis or Postgres down: keep going, the next sweep will catch up.
       log.error({ err: (err as Error).message }, "reconcile failed");
     }
   };
   // Runs left "running" by this worker's previous life are dead: recover them now.
-  const orphans = await expireOrphanedLeases(db, defaultConfig.workerId!);
+  const orphans = await store.expireOrphanedLeases(config.workerId!);
   if (orphans.length) log.warn({ orphans }, "recovering runs orphaned by this worker's previous process");
   await sweep();
   const timer = setInterval(sweep, RECONCILE_MS);

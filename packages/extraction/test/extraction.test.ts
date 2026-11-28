@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { FIELDS, validateCandidate } from "@lomi/core";
-import { FakeExtractor, PdfParseError, buildPrompt, buildSchema, parsePdf } from "../src/index.js";
+import { FakeExtractor, PdfParseError, buildPrompt, buildSchema, createExtractor, parsePdf, registerProvider } from "../src/index.js";
 
 const docs = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../fixtures/documents");
 
@@ -34,5 +34,17 @@ describe("FakeExtractor", () => {
     const { candidates } = await new FakeExtractor(0).extract({ documentType: "invoice", fields: FIELDS.invoice, text });
     const v = validateCandidate(FIELDS.invoice[2]!, candidates.due_date, text);
     expect(v.value).toBe("2025-10-14");
+  });
+});
+
+describe("provider registry (open for extension)", () => {
+  it("builds a provider registered from outside without touching the factory", () => {
+    const custom = { model: "my-model", extract: async () => ({ model: "my-model", candidates: {}, prompt: null, rawResponse: null }) };
+    registerProvider({ name: "custom", defaultModel: "my-model", create: () => custom });
+    expect(createExtractor({ LLM_PROVIDER: "custom" })).toBe(custom);
+  });
+
+  it("names the known providers when LLM_PROVIDER is unknown", () => {
+    expect(() => createExtractor({ LLM_PROVIDER: "nope" })).toThrow(/gemini, groq, anthropic, fake/);
   });
 });

@@ -1,5 +1,5 @@
 import type { FieldDef } from "./fields.js";
-import { normalizeValue, valueSupportedByQuote } from "./normalize.js";
+import { fieldType } from "./field-types.js";
 
 export interface EvidenceMatch {
   start: number;
@@ -105,7 +105,8 @@ export function validateCandidate(
   if (!candidate.evidence || !candidate.evidence.trim()) {
     return gap(def, raw, "The model returned a value without a supporting quote");
   }
-  const canonical = normalizeValue(def.type, raw);
+  const type = fieldType(def.type);
+  const canonical = type.normalize(raw);
   if (canonical === null) {
     return gap(def, raw, `Could not read "${raw}" as a ${def.type}`);
   }
@@ -118,7 +119,7 @@ export function validateCandidate(
     );
   }
   const quote = text.slice(match.start, match.end);
-  if (!valueSupportedByQuote(def.type, canonical, quote)) {
+  if (!type.isStatedIn(canonical, quote)) {
     return gap(def, raw, `Value "${raw}" is not stated in the quoted evidence "${quote.slice(0, 200)}"`);
   }
   return {

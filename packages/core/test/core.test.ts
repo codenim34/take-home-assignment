@@ -6,10 +6,9 @@ import { extractText, getDocumentProxy } from "unpdf";
 import {
   FIELDS,
   compareForCarryOver,
+  fieldType,
   findEvidence,
-  normalizeValue,
   validateCandidate,
-  valueSupportedByQuote,
   type FieldDef,
 } from "../src/index.js";
 
@@ -30,7 +29,7 @@ describe("field definitions", () => {
   });
 });
 
-describe("normalizeValue", () => {
+describe("field types", () => {
   it.each([
     ["date", "2025-09-14", "2025-09-14"],
     ["date", "March 1, 2025", "2025-03-01"],
@@ -45,14 +44,23 @@ describe("normalizeValue", () => {
     ["number", "24", "24"],
     ["string", "  INV-2025-0847 ", "INV-2025-0847"],
   ] as const)("%s %j -> %j", (type, raw, expected) => {
-    expect(normalizeValue(type, raw)).toBe(expected);
+    expect(fieldType(type).normalize(raw)).toBe(expected);
   });
 
   it("checks the value is stated in the quote", () => {
-    expect(valueSupportedByQuote("money", "5230.29", "Total Due: $5,230.29")).toBe(true);
-    expect(valueSupportedByQuote("money", "4815.00", "Total Due: $5,230.29")).toBe(false);
-    expect(valueSupportedByQuote("number", "24", "twenty-four (24) months")).toBe(true);
-    expect(valueSupportedByQuote("date", "2025-03-01", "commencing on March 1, 2025")).toBe(true);
+    expect(fieldType("money").isStatedIn("5230.29", "Total Due: $5,230.29")).toBe(true);
+    expect(fieldType("money").isStatedIn("4815.00", "Total Due: $5,230.29")).toBe(false);
+    expect(fieldType("number").isStatedIn("24", "twenty-four (24) months")).toBe(true);
+    expect(fieldType("date").isStatedIn("2025-03-01", "commencing on March 1, 2025")).toBe(true);
+  });
+
+  it("compares strings case-insensitively and everything else canonically", () => {
+    expect(fieldType("string").equals("Meridian LLC", "MERIDIAN LLC")).toBe(true);
+    expect(fieldType("money").equals("5230.29", "5230.30")).toBe(false);
+  });
+
+  it("gives every type a prompt hint", () => {
+    for (const t of ["string", "date", "money", "number", "percent"] as const) expect(fieldType(t).promptHint).toBeTruthy();
   });
 });
 
