@@ -1,6 +1,21 @@
-import type { CandidateValue } from "@lomi/core";
-import type { ExtractRequest, ExtractResult, Extractor } from "./llm.js";
-import { buildPrompt } from "./llm.js";
+import type { CandidateValue, ExtractRequest, ExtractResult, Extractor } from "@lomi/core";
+import { buildPrompt } from "../prompt.js";
+import type { ProviderDefinition } from "../registry.js";
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(t);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
+}
 
 /**
  * Offline stand-in for the LLM (LLM_PROVIDER=fake). NOT the real extraction:
@@ -29,27 +44,7 @@ export class FakeExtractor implements Extractor {
   }
 }
 
-/** Test double: returns whatever the test script says, optionally slowly. */
-export class ScriptedExtractor implements Extractor {
-  readonly model = "scripted";
-  calls = 0;
-  constructor(
-    private readonly script: (req: ExtractRequest, call: number) => Promise<Record<string, CandidateValue>> | Record<string, CandidateValue>,
-  ) {}
-  async extract(req: ExtractRequest): Promise<ExtractResult> {
-    const call = ++this.calls;
-    const candidates = await this.script(req, call);
-    return { model: this.model, candidates, prompt: buildPrompt(req), rawResponse: { candidates } };
-  }
-}
-
-export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(signal.reason);
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(t);
-      reject(signal.reason);
-    }, { once: true });
-  });
-}
+export const fake: ProviderDefinition = {
+  name: "fake",
+  create: ({ env }) => new FakeExtractor(Number(env.FAKE_LLM_DELAY_MS ?? 1500)),
+};

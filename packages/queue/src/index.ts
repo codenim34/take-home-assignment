@@ -1,5 +1,6 @@
 import { Queue, type ConnectionOptions } from "bullmq";
 import { Redis } from "ioredis";
+import type { JobQueue } from "@lomi/core";
 
 /**
  * Redis holds only "version X needs work" messages. Nothing here is the source
@@ -24,11 +25,13 @@ export function redisConnection(url = process.env.REDIS_URL ?? "redis://localhos
  * attempt means a re-queue after a crash is a NEW job and can't be swallowed
  * by a stale job left in Redis. Completed/failed jobs are removed anyway.
  */
-export function jobIdFor(versionId: string, attempts: number): string {
+function jobIdFor(versionId: string, attempts: number): string {
   return `${versionId}-a${attempts}`;
 }
 
-export class ExtractionQueue {
+/** BullMQ adapter for the JobQueue port. */
+export class ExtractionQueue implements JobQueue {
+  /** Exposed for tests and tooling (inspect waiting jobs). */
   readonly queue: Queue<ExtractionJob>;
   constructor(connection: ConnectionOptions) {
     this.queue = new Queue<ExtractionJob>(EXTRACTION_QUEUE, {

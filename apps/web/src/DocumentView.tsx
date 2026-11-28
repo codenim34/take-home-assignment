@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, isActive, type DocumentDetail, type Value } from "./api";
 import { ProgressBar, StatusBadge } from "./components";
 import { ValueCard } from "./ValueCard";
+import { DocumentText } from "./DocumentText";
+import { NewVersionUpload, RunLog, VersionPicker } from "./VersionControls";
 
 export function DocumentView({ id, version }: { id: string; version?: number }) {
   const qc = useQueryClient();
@@ -148,123 +150,5 @@ function SummaryCounts({ d }: { d: DocumentDetail }) {
         </span>
       ))}
     </div>
-  );
-}
-
-function VersionPicker({ d }: { d: DocumentDetail }) {
-  return (
-    <select
-      value={d.version.version}
-      aria-label="Version"
-      onChange={(e) => {
-        const n = Number(e.target.value);
-        const cur = d.versions.find((x) => x.id === d.document.currentVersionId)?.version;
-        window.location.hash = `#/documents/${encodeURIComponent(d.document.id)}${n === cur ? "" : `?v=${n}`}`;
-      }}
-    >
-      {[...d.versions].reverse().map((x) => (
-        <option key={x.id} value={x.version}>
-          v{x.version} · {x.status}
-          {x.id === d.document.currentVersionId ? " (current)" : ""}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-function NewVersionUpload({ id, onDone }: { id: string; onDone: () => void }) {
-  const input = useRef<HTMLInputElement>(null);
-  const up = useMutation({
-    mutationFn: (f: File) => api.uploadVersion(id, f),
-    onSuccess: () => {
-      if (input.current) input.current.value = "";
-      onDone();
-    },
-  });
-  return (
-    <div className="new-version">
-      <input ref={input} type="file" accept="application/pdf" hidden onChange={(e) => e.target.files?.[0] && up.mutate(e.target.files[0])} />
-      <button onClick={() => input.current?.click()} disabled={up.isPending}>
-        {up.isPending ? "Uploading…" : "Upload new version"}
-      </button>
-      {up.data?.duplicate && <span className="muted small">Same file as the current version; nothing changed.</span>}
-      {up.error && <span className="error small">{up.error.message}</span>}
-    </div>
-  );
-}
-
-/** The parsed text of THIS version, with every quote marked and the active one emphasised. */
-function DocumentText({
-  text,
-  values,
-  activeId,
-  onPick,
-}: {
-  text: string;
-  values: Value[];
-  activeId: string | null;
-  onPick: (id: string) => void;
-}) {
-  const activeRef = useRef<HTMLElement>(null);
-  useEffect(() => {
-    activeRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [activeId]);
-
-  const pieces = useMemo(() => {
-    const ranges = values
-      .filter((v) => v.evidenceStart !== null && v.evidenceEnd !== null)
-      .map((v) => ({ id: v.id, start: v.evidenceStart!, end: v.evidenceEnd! }))
-      .sort((a, b) => a.start - b.start);
-    const out: { text: string; id?: string }[] = [];
-    let pos = 0;
-    for (const r of ranges) {
-      if (r.start < pos) continue; // overlapping quotes: keep the first
-      if (r.start > pos) out.push({ text: text.slice(pos, r.start) });
-      out.push({ text: text.slice(r.start, r.end), id: r.id });
-      pos = r.end;
-    }
-    out.push({ text: text.slice(pos) });
-    return out;
-  }, [text, values]);
-
-  return (
-    <aside className="doc-text">
-      <h2>Document text</h2>
-      <pre>
-        {pieces.map((p, i) =>
-          p.id ? (
-            <mark
-              key={i}
-              ref={p.id === activeId ? activeRef : undefined}
-              className={p.id === activeId ? "active" : ""}
-              onClick={() => onPick(p.id!)}
-            >
-              {p.text}
-            </mark>
-          ) : (
-            <span key={i}>{p.text}</span>
-          ),
-        )}
-      </pre>
-    </aside>
-  );
-}
-
-function RunLog({ id, version }: { id: string; version: number }) {
-  const [open, setOpen] = useState(false);
-  const runs = useQuery({ queryKey: ["runs", id, version], queryFn: () => api.runs(id, version), enabled: open });
-  return (
-    <details className="runlog" onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
-      <summary>Extraction runs (prompt and raw LLM response)</summary>
-      {runs.data?.map((r) => (
-        <div key={r.id} className="run">
-          <div>
-            Attempt {r.attempt} · <strong>{r.status}</strong> · {r.model} · {new Date(r.startedAt).toLocaleString()}
-            {r.error && <span className="error"> · {r.error}</span>}
-          </div>
-          <pre>{JSON.stringify({ prompt: r.prompt, rawResponse: r.rawResponse }, null, 2)}</pre>
-        </div>
-      ))}
-    </details>
   );
 }

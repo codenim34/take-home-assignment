@@ -3,13 +3,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { sql } from "drizzle-orm";
 import pino from "pino";
-import type { CandidateValue } from "@lomi/core";
-import { createDb, runMigrations, type Db } from "@lomi/db";
-import { ScriptedExtractor, type ExtractRequest } from "@lomi/extraction";
+import type { CandidateValue, ExtractRequest, JobQueue } from "@lomi/core";
+import { PgExtractionStore, createDb, runMigrations, type Db } from "@lomi/db";
+import { ScriptedExtractor } from "@lomi/extraction/testing";
 import type { Deps } from "@lomi/worker";
-import { buildApp, type Enqueuer } from "../src/app.js";
+import { buildApp } from "../src/app.js";
 
-export const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres@localhost:5432/lomi_test";
+const DATABASE_URL = process.env.DATABASE_URL ?? "postgres://postgres@localhost:5432/lomi_test";
 export const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379/1";
 
 const fixtures = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../fixtures/documents");
@@ -24,7 +24,7 @@ export async function resetDb(db: Db) {
   await db.execute(sql`truncate reviews, extracted_values, extraction_runs, document_versions, documents cascade`);
 }
 
-export class RecordingQueue implements Enqueuer {
+export class RecordingQueue implements JobQueue {
   jobs: { versionId: string; attempts: number }[] = [];
   fail = false;
   async enqueue(versionId: string, attempts: number) {
@@ -33,15 +33,17 @@ export class RecordingQueue implements Enqueuer {
   }
 }
 
-export async function makeApp(db: Db, queue: Enqueuer = new RecordingQueue()) {
+export async function makeApp(db: Db, queue: JobQueue = new RecordingQueue()) {
   return buildApp({ db, queue, logger: false });
 }
+
+export const store = (db: Db) => new PgExtractionStore(db);
 
 export const log = pino({ level: "silent" });
 
 export function deps(db: Db, extractor: Deps["extractor"], extra: Partial<Deps> = {}): Deps {
   return {
-    db,
+    store: store(db),
     extractor,
     log,
     config: { leaseMs: 30_000, heartbeatMs: 50, maxAttempts: 3, retryBaseMs: 1000 },

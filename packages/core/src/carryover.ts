@@ -1,6 +1,6 @@
-import type { FieldType } from "./fields.js";
+import { fieldType, type FieldType } from "./field-types.js";
 import { findEvidence } from "./evidence.js";
-import { collapseWhitespace, valuesEqual } from "./normalize.js";
+import { collapseWhitespace } from "./text.js";
 
 export interface ComparableValue {
   value: string | null;
@@ -46,7 +46,7 @@ export function compareForCarryOver(
   if (prev.value === null || next.value === null) {
     return { change: "changed", detail: "Gap in one of the versions" };
   }
-  if (!valuesEqual(type, prev.value, next.value)) {
+  if (!fieldType(type).equals(prev.value, next.value)) {
     return { change: "changed", detail: `Value changed from ${prev.value} to ${next.value}` };
   }
   if (!prev.evidence || !next.evidence) {

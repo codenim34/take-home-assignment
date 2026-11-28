@@ -1,2 +1,3 @@
-export * from "./process.js";
-export * from "./reconciler.js";
+export { processVersion, type Deps, type ProcessOutcome } from "./pipeline.js";
+export { reconcileOnce } from "./reconciler.js";
+export type { WorkerConfig } from "./config.js";
