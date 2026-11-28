@@ -14,7 +14,7 @@ docker compose up --build
 - UI: http://localhost:8080, API: http://localhost:3000
 - `migrate` runs the migrations, seeds version 1 of the three fixture documents, and exits. The worker picks the seeded documents up on its own.
 - No key? Run `LLM_PROVIDER=fake docker compose up`. The fake is a "Label: value" line matcher for clicking around, not real extraction. Without a key and without `fake`, every extraction fails visibly with "GEMINI_API_KEY is not set" and can be retried once a key is set.
-- Provider: `LLM_PROVIDER=gemini` (default, `gemini-3.8-flash`) or `anthropic` (`claude-sonnet-5-5`, needs `ANTHROPIC_API_KEY`). Override the model with `LLM_MODEL`.
+- Provider: `LLM_PROVIDER=gemini` (default, `gemini-3.8-flash`, `GEMINI_API_KEY`), `groq` (`openai/gpt-oss-20b`, `GROQ_API_KEY`) or `anthropic` (`claude-sonnet-5-5`, `ANTHROPIC_API_KEY`). Override the model with `LLM_MODEL`. Free tiers rate-limit quickly; that's handled (see *Transient LLM errors* below), it just slows extraction down.
 
 **What to click first**
 1. Open the **Invoice**. Each value sits next to its quote, and the quote is highlighted in the document text on the right. Approve all five (correct one if you like).
@@ -39,7 +39,7 @@ packages/
               validation, carry-over rule. Most of the bug-prone code lives here.
   db/         Drizzle schema, migrations, and every SQL state transition
               (claim, heartbeat, guarded commit, fail, reconcile, review, reads).
-  extraction/ PDF → text (unpdf), text → candidates (Gemini or Anthropic, structured output),
+  extraction/ PDF → text (unpdf), text → candidates (Gemini, Groq or Anthropic, structured output),
               plus a fake and a scripted extractor for tests.
   queue/      Queue name, job-id convention, enqueue helper. Small on purpose.
 ```
@@ -102,6 +102,7 @@ How each failure plays out:
 - **Killed worker (SIGKILL):** runs record `worker_id` (the container hostname, stable across restarts). On startup a worker expires the leases of runs still marked as its own, since they're certainly dead, and recovers them immediately. A worker that never comes back is recovered when its lease expires (≤ 30s + one sweep).
 - **`FLUSHALL` + restart:** the queue is empty, and the startup sweep re-enqueues every `queued` version from Postgres. Values, reviews and run logs were never in Redis.
 - **Postgres down:** the API returns errors, the worker's sweeps log and retry, and nothing is half-written because every transition is one transaction.
+- **Transient LLM errors** (429 rate limit, 5xx/overloaded, network): the run fails, but the version goes back to `queued` with `retry_at = now() + backoff`. The backoff uses the provider's Retry-After or `retryDelay` when given, and 20s, 40s, 80s otherwise, capped at 5 min. The reconciler only enqueues versions that are due, and the claim also checks `retry_at`, so a stray job can't jump the queue. Each retry spends an attempt, so after 3 the version is `failed` with the reason, and **Retry** starts over. The backoff lives in Postgres rather than in a BullMQ delayed job, so it survives a `FLUSHALL` too. The SDKs' own retries are kept at 0 or 1, so there's one retry policy instead of two stacked ones.
 - **LLM / parse error:** the version becomes `failed` with the message, the run keeps its prompt and raw response, and **Retry** (`POST /documents/:id/retry`) resets the attempt budget.
 - **Same version extracted twice** (retry, recovery, double click, duplicate job): the conditional claim plus the guarded commit plus `UNIQUE(version_id, field)` mean one set of values. Re-uploading byte-identical bytes returns the current version (`200 duplicate: true`) instead of creating a new one.
 
@@ -109,7 +110,7 @@ All of these are covered in `apps/api/test/integration.test.ts`, against real Po
 
 ## Extraction and the hallucination defence
 
-The LLM (Gemini by default via `responseJsonSchema`, or Claude via structured outputs; both behind one `Extractor` interface) returns `{value, evidence, reason}` for every field of the type. The prompt asks for evidence copied character for character, *including the label* ("Due Date: 2025-10-14"). That matters because `2025-09-14` appears twice in the revised invoice. Each candidate then goes through `core/validateCandidate`:
+The LLM (Gemini by default via `responseJsonSchema`, Groq via strict `json_schema`, or Claude via structured outputs; all behind one `Extractor` interface) returns `{value, evidence, reason}` for every field of the type. The prompt asks for evidence copied character for character, *including the label* ("Due Date: 2025-10-14"). That matters because `2025-09-14` appears twice in the revised invoice. Each candidate then goes through `core/validateCandidate`:
 
 1. If there's no value, it's a gap with the model's reason. The model is told never to guess.
 2. The value must parse as its type (date, money, number, percent, string), or it becomes a gap.
@@ -146,7 +147,6 @@ The comparison runs **inside the guarded commit transaction**, so it sees the pr
 ## What I cut, and what I'd do next
 
 - **Auth and reviewer identity.** `reviewer` is a free-text field that defaults to "reviewer". Next would be real users and showing who approved what.
-- **Automatic retry of transient LLM errors** (429/529) with backoff. Today one SDK retry happens, then the version is `failed` and needs a click. Next: classify errors and re-queue retryable ones with a delay, within the attempt budget.
 - **Large and scanned documents.** No OCR and no chunking. A scanned PDF fails with "no extractable text".
 - **PDF view with highlights.** The UI highlights the quote in the parsed text and links to the PDF, but doesn't highlight inside the PDF itself.
 - **UI tests.** The behaviour lives in the API and is covered there. Next would be a Playwright run of the v1 → v2 review flow.

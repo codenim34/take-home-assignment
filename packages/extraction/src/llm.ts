@@ -19,15 +19,48 @@ export interface ExtractResult {
   rawResponse: unknown;
 }
 
-/** Raised for model-side failures that should leave the version `failed`. */
+/**
+ * Model-side failure. Non-retryable ones leave the version `failed`.
+ * Retryable ones (rate limit, overload, network) re-queue the version with a
+ * delay, spending one attempt; after the attempt budget it ends up `failed`.
+ */
 export class LlmError extends Error {
   constructor(
     message: string,
     public readonly prompt?: unknown,
     public readonly rawResponse?: unknown,
+    public readonly retry?: { retryable: true; afterMs?: number },
   ) {
     super(message);
   }
+  get retryable(): boolean {
+    return this.retry?.retryable === true;
+  }
+}
+
+/** 429, 408, 409 and 5xx (incl. 529 overloaded) and network errors are worth retrying later. */
+export function isRetryableStatus(status: number | undefined): boolean {
+  return status === undefined || status === 408 || status === 409 || status === 429 || status >= 500;
+}
+
+/** Reads Retry-After (seconds) from an SDK error's headers, if any. */
+export function retryAfterMs(headers: unknown): number | undefined {
+  const get = (k: string): string | null | undefined =>
+    headers && typeof (headers as Headers).get === "function"
+      ? (headers as Headers).get(k)
+      : (headers as Record<string, string> | undefined)?.[k];
+  const v = get("retry-after");
+  const n = v ? Number(v) : NaN;
+  return Number.isFinite(n) && n > 0 ? n * 1000 : undefined;
+}
+
+export function httpLlmError(provider: string, status: number | undefined, message: string, prompt: unknown, headers?: unknown) {
+  return new LlmError(
+    `${provider} request failed (${status ?? "network"}): ${message}`,
+    prompt,
+    undefined,
+    isRetryableStatus(status) ? { retryable: true, afterMs: retryAfterMs(headers) } : undefined,
+  );
 }
 
 export interface Extractor {
@@ -110,7 +143,7 @@ export class AnthropicExtractor implements Extractor {
     } catch (err) {
       if (err instanceof Anthropic.APIUserAbortError) throw err;
       if (err instanceof Anthropic.APIError) {
-        throw new LlmError(`LLM request failed (${err.status ?? "network"}): ${err.message}`, prompt);
+        throw httpLlmError("Anthropic", err.status, err.message, prompt, err.headers);
       }
       throw new LlmError(`LLM output could not be parsed: ${(err as Error).message}`, prompt);
     }
