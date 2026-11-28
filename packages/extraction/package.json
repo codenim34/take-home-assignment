@@ -5,7 +5,12 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
@@ -14,6 +19,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.14.0",
+    "@google/genai": "^3.6.1",
     "@lomi/core": "workspace:*",
     "unpdf": "^2.2.3",
     "zod": "^4.6.7"

@@ -7,13 +7,14 @@ The brief is in [docs/ASSIGNMENT.md](docs/ASSIGNMENT.md).
 ## Run it
 
 ```sh
-cp .env.example .env        # put your ANTHROPIC_API_KEY in it
+cp .env.example .env        # put your GEMINI_API_KEY in it
 docker compose up --build
 ```
 
 - UI: http://localhost:8080, API: http://localhost:3000
 - `migrate` runs the migrations, seeds version 1 of the three fixture documents, and exits. The worker picks the seeded documents up on its own.
-- No key? Run `LLM_PROVIDER=fake docker compose up`. The fake is a "Label: value" line matcher for clicking around, not real extraction. Without a key and without `fake`, every extraction fails visibly with "ANTHROPIC_API_KEY is not set" and can be retried once a key is set.
+- No key? Run `LLM_PROVIDER=fake docker compose up`. The fake is a "Label: value" line matcher for clicking around, not real extraction. Without a key and without `fake`, every extraction fails visibly with "GEMINI_API_KEY is not set" and can be retried once a key is set.
+- Provider: `LLM_PROVIDER=gemini` (default, `gemini-3.8-flash`) or `anthropic` (`claude-sonnet-5-5`, needs `ANTHROPIC_API_KEY`). Override the model with `LLM_MODEL`.
 
 **What to click first**
 1. Open the **Invoice**. Each value sits next to its quote, and the quote is highlighted in the document text on the right. Approve all five (correct one if you like).
@@ -38,7 +39,7 @@ packages/
               validation, carry-over rule. Most of the bug-prone code lives here.
   db/         Drizzle schema, migrations, and every SQL state transition
               (claim, heartbeat, guarded commit, fail, reconcile, review, reads).
-  extraction/ PDF → text (unpdf), text → candidates (Anthropic structured output),
+  extraction/ PDF → text (unpdf), text → candidates (Gemini or Anthropic, structured output),
               plus a fake and a scripted extractor for tests.
   queue/      Queue name, job-id convention, enqueue helper. Small on purpose.
 ```
@@ -108,7 +109,7 @@ All of these are covered in `apps/api/test/integration.test.ts`, against real Po
 
 ## Extraction and the hallucination defence
 
-The LLM (`claude-sonnet-5-5`, structured output, low effort) returns `{value, evidence, reason}` for every field of the type. The prompt asks for evidence copied character for character, *including the label* ("Due Date: 2025-10-14"). That matters because `2025-09-14` appears twice in the revised invoice. Each candidate then goes through `core/validateCandidate`:
+The LLM (Gemini by default via `responseJsonSchema`, or Claude via structured outputs; both behind one `Extractor` interface) returns `{value, evidence, reason}` for every field of the type. The prompt asks for evidence copied character for character, *including the label* ("Due Date: 2025-10-14"). That matters because `2025-09-14` appears twice in the revised invoice. Each candidate then goes through `core/validateCandidate`:
 
 1. If there's no value, it's a gap with the model's reason. The model is told never to guess.
 2. The value must parse as its type (date, money, number, percent, string), or it becomes a gap.
