@@ -57,6 +57,8 @@ export const documentVersions = pgTable(
     /** Fencing token: only the run that holds it may commit or fail the version. */
     currentRunId: uuid("current_run_id"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    /** Queued but not before this time (backoff after a rate limit / transient LLM error). */
+    retryAt: timestamp("retry_at", { withTimezone: true }),
     error: text("error"),
     /** Version whose values this one was compared against (carry-over base). */
     baseVersionId: uuid("base_version_id"),

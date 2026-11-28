@@ -44,7 +44,7 @@ export function deps(db: Db, extractor: Deps["extractor"], extra: Partial<Deps> 
     db,
     extractor,
     log,
-    config: { leaseMs: 30_000, heartbeatMs: 50, maxAttempts: 3 },
+    config: { leaseMs: 30_000, heartbeatMs: 50, maxAttempts: 3, retryBaseMs: 1000 },
     ...extra,
   };
 }

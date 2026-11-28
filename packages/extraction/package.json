@@ -21,6 +21,7 @@
     "@anthropic-ai/sdk": "^1.14.0",
     "@google/genai": "^3.6.1",
     "@lomi/core": "workspace:*",
+    "groq-sdk": "^1.6.0",
     "unpdf": "^2.2.3",
     "zod": "^4.6.7"
   },

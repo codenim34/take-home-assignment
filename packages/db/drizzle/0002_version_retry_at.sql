@@ -1,0 +1,1 @@
+ALTER TABLE "document_versions" ADD COLUMN "retry_at" timestamp with time zone;

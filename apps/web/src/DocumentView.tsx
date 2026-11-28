@@ -62,6 +62,12 @@ export function DocumentView({ id, version }: { id: string; version?: number }) 
         <div className="banner info">
           <span className="spinner" /> Version {v.version} is {v.status === "queued" ? "queued for extraction" : "being extracted"}. Values
           appear here when it finishes{v.attempts > 1 ? ` (attempt ${v.attempts})` : ""}.
+          {v.status === "queued" && v.retryAt && v.error && (
+            <>
+              {" "}
+              The last attempt hit a temporary LLM error, so it will retry at {new Date(v.retryAt).toLocaleTimeString()}. <span className="muted">({v.error})</span>
+            </>
+          )}
           {lastExtracted && (
             <>
               {" "}

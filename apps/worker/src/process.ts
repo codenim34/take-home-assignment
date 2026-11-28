@@ -16,6 +16,8 @@ export interface WorkerConfig {
   leaseMs: number;
   heartbeatMs: number;
   maxAttempts: number;
+  /** Backoff base for transient LLM errors without a Retry-After hint. */
+  retryBaseMs: number;
   /** Stable identity of this worker (container hostname by default). */
   workerId?: string;
 }
@@ -24,6 +26,7 @@ export const defaultConfig: WorkerConfig = {
   leaseMs: Number(process.env.LEASE_MS ?? 30_000),
   heartbeatMs: Number(process.env.HEARTBEAT_MS ?? 10_000),
   maxAttempts: Number(process.env.MAX_ATTEMPTS ?? 3),
+  retryBaseMs: Number(process.env.RETRY_BASE_MS ?? 20_000),
   workerId: process.env.WORKER_ID ?? hostname(),
 };
 
@@ -40,6 +43,7 @@ export type ProcessOutcome =
   | "not_claimed"
   | "extracted"
   | "failed"
+  | "retry_scheduled"
   | "requeued_on_shutdown"
   | "lost_ownership";
 
@@ -112,6 +116,20 @@ export async function processVersion(deps: Deps, versionId: string): Promise<Pro
       await failRun(db, { versionId, runId, error: "Worker shut down mid-extraction", requeue: true });
       runLog.info("handed back to the queue on shutdown");
       return "requeued_on_shutdown";
+    }
+    if (err instanceof LlmError && err.retryable) {
+      // Rate limit / overload / network: durable backoff in Postgres, not a crash loop.
+      const attempt = claim.version.attempts;
+      const delay = Math.min(err.retry?.afterMs ?? config.retryBaseMs * 2 ** (attempt - 1), 5 * 60_000);
+      const owned = await failRun(db, {
+        versionId,
+        runId,
+        error: err.message,
+        retryAfterMs: delay,
+        maxAttempts: config.maxAttempts,
+      });
+      runLog.warn({ err: err.message, retryInMs: delay, owned }, "transient LLM error; re-queued with backoff");
+      return owned ? "retry_scheduled" : "lost_ownership";
     }
     const message =
       err instanceof PdfParseError || err instanceof LlmError

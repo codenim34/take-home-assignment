@@ -1,7 +1,7 @@
 import { ApiError, GoogleGenAI } from "@google/genai";
 import { z } from "zod";
 import type { CandidateValue } from "@lomi/core";
-import { LlmError, buildPrompt, buildSchema, type ExtractRequest, type ExtractResult, type Extractor } from "./llm.js";
+import { LlmError, buildPrompt, buildSchema, httpLlmError, type ExtractRequest, type ExtractResult, type Extractor } from "./llm.js";
 
 /**
  * Gemini with structured output (responseJsonSchema). Same prompt, same
@@ -47,9 +47,14 @@ export class GeminiExtractor implements Extractor {
     } catch (err) {
       if (req.signal?.aborted) throw req.signal.reason;
       if (err instanceof ApiError) {
-        throw new LlmError(`LLM request failed (${err.status}): ${err.message}`, prompt);
+        const e = httpLlmError("Gemini", err.status, err.message, prompt);
+        // Gemini puts the suggested wait in the body: "retryDelay": "31s".
+        const delay = /retryDelay"?\s*:\s*"(\d+(?:\.\d+)?)s"/.exec(err.message)?.[1];
+        if (delay && e.retry) throw new LlmError(e.message, prompt, undefined, { retryable: true, afterMs: Number(delay) * 1000 });
+        throw e;
       }
-      throw new LlmError(`LLM request failed: ${(err as Error).message}`, prompt);
+      // Network-level failure (DNS, reset, timeout): worth retrying later.
+      throw httpLlmError("Gemini", undefined, (err as Error).message, prompt);
     }
 
     const candidate = response.candidates?.[0];

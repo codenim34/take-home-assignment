@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { Redis } from "ioredis";
 import { claimVersion, expireOrphanedLeases, documentVersions, extractedValues, extractionRuns, reconcile, type Db } from "@lomi/db";
-import { ScriptedExtractor } from "@lomi/extraction";
+import { LlmError, ScriptedExtractor } from "@lomi/extraction";
 import { ExtractionQueue } from "@lomi/queue";
 import { processVersion, reconcileOnce } from "@lomi/worker";
 import {
@@ -32,7 +32,7 @@ let closeDb: () => Promise<void>;
 beforeAll(async () => {
   ({ db, close: closeDb } = await setupDb());
 });
-afterAll(async () => closeDb());
+afterAll(async () => closeDb?.());
 beforeEach(async () => resetDb(db));
 
 async function uploadInvoice(queue = new RecordingQueue()) {
@@ -134,6 +134,42 @@ describe("extraction", () => {
     expect(await processVersion(deps(db, flaky), versionId)).toBe("extracted");
   });
 
+  it("a rate limit re-queues with backoff (durably, in Postgres), then succeeds", async () => {
+    const { app, id, versionId } = await uploadInvoice();
+    const limited = new ScriptedExtractor((req, call) => {
+      if (call === 1) throw new LlmError("Groq request failed (429): rate limit", null, null, { retryable: true, afterMs: 60_000 });
+      return invoiceAnswer(req);
+    });
+    expect(await processVersion(deps(db, limited), versionId)).toBe("retry_scheduled");
+    const waiting = await getDoc(app, id);
+    expect(waiting.version).toMatchObject({ status: "queued", attempts: 1 });
+    expect(waiting.version.error).toMatch(/Will retry: .*429/);
+
+    // Not due yet: the reconciler doesn't enqueue it and a stray job can't claim it.
+    expect((await reconcile(db, 3)).queued).toEqual([]);
+    expect(await processVersion(deps(db, limited), versionId)).toBe("not_claimed");
+
+    await db.update(documentVersions).set({ retryAt: sql`now() - interval '1 second'` }).where(eq(documentVersions.id, versionId));
+    expect((await reconcile(db, 3)).queued).toEqual([{ id: versionId, attempts: 1 }]);
+    expect(await processVersion(deps(db, limited), versionId)).toBe("extracted");
+    expect((await getDoc(app, id)).version.error).toBeNull();
+  });
+
+  it("gives up with a visible failure when the rate limit outlasts the attempt budget", async () => {
+    const { app, id, versionId } = await uploadInvoice();
+    const alwaysLimited = new ScriptedExtractor(() => {
+      throw new LlmError("Gemini request failed (429): quota exceeded", null, null, { retryable: true });
+    });
+    for (let i = 0; i < 3; i++) {
+      await db.update(documentVersions).set({ retryAt: null }).where(eq(documentVersions.id, versionId));
+      await processVersion(deps(db, alwaysLimited), versionId);
+    }
+    const v = (await getDoc(app, id)).version;
+    expect(v.status).toBe("failed");
+    expect(v.error).toMatch(/quota exceeded.*gave up after 3 attempts/);
+    expect((await app.inject({ method: "POST", url: `/documents/${id}/retry` })).statusCode).toBe(202);
+  });
+
   it("marks an unparseable PDF as failed", async () => {
     const { versionId } = await uploadInvoice();
     await db.update(documentVersions).set({ pdf: Buffer.from("%PDF-1.4 garbage") }).where(eq(documentVersions.id, versionId));
@@ -174,7 +210,7 @@ describe("crash and restart recovery", () => {
   it("the zombie worker that comes back late cannot commit over the new run", async () => {
     const { versionId } = await uploadInvoice();
     const { extractor, release, started } = gatedExtractor();
-    const zombie = processVersion(deps(db, extractor, { config: { leaseMs: 30_000, heartbeatMs: 60_000, maxAttempts: 3 } }), versionId);
+    const zombie = processVersion(deps(db, extractor, { config: { leaseMs: 30_000, heartbeatMs: 60_000, maxAttempts: 3, retryBaseMs: 1000 } }), versionId);
     await started;
     await db.update(documentVersions).set({ leaseExpiresAt: sql`now() - interval '1 second'` }).where(eq(documentVersions.id, versionId));
     await reconcile(db, 3);
@@ -320,7 +356,7 @@ describe("re-extraction and carry-over", () => {
     await upload(app, `/documents/${id}/versions`, pdf("invoice-001.v2.pdf"));
     const v2Id = (await getDoc(app, id)).version.id;
     const { extractor, release, started } = gatedExtractor();
-    const v2Run = processVersion(deps(db, extractor, { config: { leaseMs: 30_000, heartbeatMs: 60_000, maxAttempts: 3 } }), v2Id);
+    const v2Run = processVersion(deps(db, extractor, { config: { leaseMs: 30_000, heartbeatMs: 60_000, maxAttempts: 3, retryBaseMs: 1000 } }), v2Id);
     await started;
 
     // v3 arrives (same bytes as v1 here, to make the carry-over base obvious).

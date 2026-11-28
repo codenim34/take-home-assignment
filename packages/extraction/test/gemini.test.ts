@@ -71,3 +71,22 @@ describe("GeminiExtractor", () => {
     expect(createExtractor({ LLM_PROVIDER: "fake" }).model).toBe("fake-label-matcher");
   });
 });
+
+describe("retryable errors", () => {
+  it("marks 429 as retryable and reads Gemini's retryDelay", async () => {
+    reply = () => ({
+      status: 429,
+      json: { error: { code: 429, message: "Quota exceeded", details: [{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "31s" }] } },
+    });
+    const err = await new GeminiExtractor("m", { apiKey: "k", baseUrl }).extract(req).catch((e) => e);
+    expect(err).toBeInstanceOf(LlmError);
+    expect(err.retryable).toBe(true);
+    expect(err.retry.afterMs).toBe(31_000);
+  });
+
+  it("does not retry a bad request", async () => {
+    reply = () => ({ status: 400, json: { error: { code: 400, message: "bad" } } });
+    const err = await new GeminiExtractor("m", { apiKey: "k", baseUrl }).extract(req).catch((e) => e);
+    expect(err.retryable).toBe(false);
+  });
+});

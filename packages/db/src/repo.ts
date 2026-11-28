@@ -143,7 +143,7 @@ export async function retryCurrentVersion(db: Db, documentId: string): Promise<V
     const doc = await lockDocument(tx, documentId);
     const [updated] = await tx
       .update(documentVersions)
-      .set({ status: "queued", attempts: 0, error: null, currentRunId: null, leaseExpiresAt: null })
+      .set({ status: "queued", attempts: 0, error: null, currentRunId: null, leaseExpiresAt: null, retryAt: null })
       .where(and(eq(documentVersions.id, doc.currentVersionId!), eq(documentVersions.status, "failed")))
       .returning();
     if (!updated) throw new DomainError("conflict", "Only a failed current version can be retried");
@@ -174,13 +174,14 @@ export async function claimVersion(
         attempts: sql`${documentVersions.attempts} + 1`,
         currentRunId: runId,
         leaseExpiresAt: sql`now() + make_interval(secs => ${opts.leaseMs / 1000})`,
-        error: null,
+        retryAt: null,
       })
       .where(
         and(
           eq(documentVersions.id, versionId),
           eq(documentVersions.status, "queued"),
           lt(documentVersions.attempts, opts.maxAttempts),
+          sql`(${documentVersions.retryAt} is null or ${documentVersions.retryAt} <= now())`,
         ),
       )
       .returning();
@@ -319,6 +320,7 @@ export async function commitExtraction(
       .update(documentVersions)
       .set({
         status: "extracted",
+        error: null,
         parsedText: input.parsedText,
         extractedAt: sql`now()`,
         leaseExpiresAt: null,
@@ -339,13 +341,30 @@ export async function commitExtraction(
  */
 export async function failRun(
   db: Db,
-  input: { versionId: string; runId: string; error: string; requeue?: boolean; parsedText?: string },
+  input: {
+    versionId: string;
+    runId: string;
+    error: string;
+    requeue?: boolean;
+    parsedText?: string;
+    /** Transient LLM error: back to `queued` after this delay, spending the attempt (or `failed` if none left). */
+    retryAfterMs?: number;
+    maxAttempts?: number;
+  },
 ): Promise<boolean> {
   return db.transaction(async (tx) => {
     const rows = await tx
       .update(documentVersions)
       .set(
-        input.requeue
+        input.retryAfterMs !== undefined
+          ? {
+              status: sql`(case when ${documentVersions.attempts} >= ${input.maxAttempts ?? 3} then 'failed' else 'queued' end)::version_status`,
+              error: sql`case when ${documentVersions.attempts} >= ${input.maxAttempts ?? 3} then ${`${input.error} (gave up after ${input.maxAttempts ?? 3} attempts)`} else ${`Will retry: ${input.error}`} end`,
+              retryAt: sql`now() + make_interval(secs => ${input.retryAfterMs / 1000})`,
+              currentRunId: null,
+              leaseExpiresAt: null,
+            }
+          : input.requeue
           ? {
               status: "queued",
               attempts: sql`greatest(${documentVersions.attempts} - 1, 0)`,
@@ -422,7 +441,12 @@ export async function reconcile(
     const queued = await tx
       .select({ id: documentVersions.id, attempts: documentVersions.attempts })
       .from(documentVersions)
-      .where(eq(documentVersions.status, "queued"))
+      .where(
+        and(
+          eq(documentVersions.status, "queued"),
+          sql`(${documentVersions.retryAt} is null or ${documentVersions.retryAt} <= now())`,
+        ),
+      )
       .orderBy(documentVersions.createdAt);
     return {
       requeued: expired.filter((e) => e.status === "queued").map((e) => e.id),
@@ -563,6 +587,7 @@ function publicVersion(v: VersionRow) {
     fileName: v.fileName,
     attempts: v.attempts,
     error: v.error,
+    retryAt: v.retryAt,
     createdAt: v.createdAt,
     extractedAt: v.extractedAt,
     baseVersionId: v.baseVersionId,
