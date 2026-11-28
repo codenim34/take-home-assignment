@@ -1,0 +1,28 @@
+{
+  "name": "@lomi/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "dev": "tsx watch src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@lomi/core": "workspace:*",
+    "@lomi/db": "workspace:*",
+    "@lomi/extraction": "workspace:*",
+    "@lomi/queue": "workspace:*",
+    "bullmq": "^5.81.6",
+    "pino": "^9.7.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15",
+    "vitest": "^3.2.7"
+  }
+}
